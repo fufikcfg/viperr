@@ -12,9 +12,17 @@ import (
 )
 
 // Validator is implemented by a destination that has rules beyond the config tag.
-// Decode calls it after every tagged field has been bound.
+// Decode calls it after every tagged field has been bound, normalized, and
+// validated. Prefer validate tags; keep Validate for rules tags cannot express.
 type Validator interface {
 	Validate() error
+}
+
+// Normalizer is implemented by a destination or a nested section that fixes
+// up its own values — trim, lowercase, derive — before tag validation runs.
+// Sections are normalized before the root.
+type Normalizer interface {
+	Normalize() error
 }
 
 // Options controls Decode.
@@ -22,6 +30,8 @@ type Options struct {
 	// AppDir is the base for fields tagged path.
 	// An empty AppDir leaves a relative path relative.
 	AppDir string
+	// Validation customizes tag validation. Nil uses the shipped rules only.
+	Validation []Option
 }
 
 // Decode binds sources into dst, which must be a pointer to a struct.
@@ -30,6 +40,9 @@ type Options struct {
 // A field default is used only when the selected sources do not contain the key.
 // required fails when the key is absent and the field has no default.
 // Presence is not the same as a non-zero Go value: "0" satisfies required and beats a default.
+//
+// After binding, Decode normalizes (see Normalizer), checks validate tags
+// (see Validate), then calls the Validator hook when implemented.
 func Decode(dst any, opt Options, sources ...Source) error {
 	v := reflect.ValueOf(dst)
 	if v.Kind() != reflect.Pointer || v.IsNil() {
@@ -40,6 +53,12 @@ func Decode(dst any, opt Options, sources ...Source) error {
 		return fmt.Errorf("viperr: destination must be a non-nil pointer to a struct")
 	}
 	if err := bindStruct(v, opt, sources); err != nil {
+		return err
+	}
+	if err := normalizeValue(v); err != nil {
+		return fmt.Errorf("viperr: normalize: %w", err)
+	}
+	if err := Validate(dst, opt.Validation...); err != nil {
 		return err
 	}
 	if validator, ok := dst.(Validator); ok {
@@ -54,7 +73,8 @@ func Decode(dst any, opt Options, sources ...Source) error {
 // An empty dir uses ResolveAppDir. The process environment wins over dir/.env,
 // which wins over settings.xml or settings/settings.xml. A missing file is skipped.
 // Path fields are resolved against dir.
-func Load(dst any, dir string) error {
+// opts customize tag validation, see Validate.
+func Load(dst any, dir string, opts ...Option) error {
 	if strings.TrimSpace(dir) == "" {
 		resolved, err := ResolveAppDir()
 		if err != nil {
@@ -87,7 +107,37 @@ func Load(dst any, dir string) error {
 		xmlMap = Map{}
 	}
 	sources = append(sources, Name(SourceXML, xmlMap))
-	return Decode(dst, Options{AppDir: dir}, sources...)
+	return Decode(dst, Options{AppDir: dir, Validation: opts}, sources...)
+}
+
+// normalizeValue calls Normalize on nested sections first, then on v itself,
+// so the root sees sections already fixed up.
+func normalizeValue(v reflect.Value) error {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		sf := t.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		d := v.Field(i)
+		for d.Kind() == reflect.Pointer {
+			if d.IsNil() {
+				break
+			}
+			d = d.Elem()
+		}
+		if d.Kind() == reflect.Struct && d.Type() != reflect.TypeOf(time.Time{}) {
+			if err := normalizeValue(d); err != nil {
+				return err
+			}
+		}
+	}
+	if v.CanAddr() {
+		if n, ok := v.Addr().Interface().(Normalizer); ok {
+			return n.Normalize()
+		}
+	}
+	return nil
 }
 
 func bindStruct(v reflect.Value, opt Options, sources []Source) error {

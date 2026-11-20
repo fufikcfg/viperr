@@ -22,7 +22,30 @@
 // A path option is resolved against Options.AppDir. Load sets that directory
 // from the dir argument, or from ResolveAppDir when dir is empty.
 //
-// After a successful bind, Decode calls Validate if the destination implements
-// Validator. That is the place for rules that are not key presence or a value
-// from a fixed set, such as "worker limit must be positive".
+// # Validation
+//
+// A second tag, validate, checks the bound value. Commas separate rules;
+// | separates alternatives inside one rule; = passes a parameter.
+//
+//	type Config struct {
+//		Host     string        `config:"DB_HOST" validate:"required,notblank,host"`
+//		DBPort   string        `config:"DB_PORT,default=5432" validate:"port"`
+//		SyncLoop time.Duration `config:"APP_SYNC_LOOP" validate:"mindur=1s"`
+//		Workers  int           `config:"APP_WORKER_LIMIT" validate:"positive"`
+//		Addr     string        `config:"APP_SERVER_URL" validate:"required_without=Port,omitempty,listen_addr"`
+//		Port     string        `config:"APP_SERVER_PORT" validate:"required_without=Addr,omitempty,port"`
+//	}
+//
+// Built-in tags: required, omitempty, required_without, gt, gte, lt, lte,
+// min, max, eq, ne (numbers by value, strings by length, durations accept
+// "1s" parameters), oneof, port, ip, ipv4, ipv6, fqdn, hostname_rfc1123,
+// dns_rfc1035_label, dirpath, duration.
+//
+// Shipped on top: notblank, mindur, maxdur, listen_addr, oneof_ci,
+// writable_dir, pg_ident, and the aliases positive (gt=0), nonneg (gte=0),
+// host (hostname_rfc1123|ip|fqdn), log_level, pg_sslmode.
+//
+// Decode and Load run tag validation automatically, after Normalizer hooks
+// and before the Validator hook. WithRules, WithAliases, and WithStructRules
+// extend the ruleset; Validate applies the same rules to any struct.
 package viperr

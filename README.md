@@ -137,12 +137,61 @@ abs := viperr.Resolve("logs", appDir)
 Ошибки по полям собираются вместе, в тексте есть имя ключа
 
 1) разбор типа: `APP_LOCK_TIMEOUT=abc` или нечисловой int это ошибка
-2) присутствие: `required` без значения и без default
-3) набор значений: `oneof`
-4) своё правило: если у значения есть метод `Validate() error`, `Decode` вызывает его после заполнения полей
+2) присутствие: `required` в теге `config` без значения и без default
+3) набор значений: `oneof` в теге `config`
+4) нормализация: метод `Normalize() error` у секции или у корня; секции раньше корня
+5) тег `validate`: значения полей после привязки и нормализации
+6) своё правило: метод `Validate() error` у корня, вызывается последним
 
-Так проверяют то, что не выразить тегом, например лимит воркеров больше нуля
-Общий порог «больше нуля» на все поля не используется: он отверг бы законный `APP_LOCK_TIMEOUT=0`
+## Тег validate
+
+Второй тег проверяет уже привязанное значение
+Запятая разделяет правила, `|` это «или» внутри одного правила, `=` передаёт параметр
+В ошибках поле называется ключом из `config`: не `SyncLoop`, а `APP_SYNC_LOOP`
+Первая неудача по полю останавливает его остальные правила
+
+```go
+type Config struct {
+    Host     string        `config:"DB_HOST" validate:"required,notblank,host"`
+    DBPort   string        `config:"DB_PORT,default=5432" validate:"port"`
+    User     string        `config:"DB_USER" validate:"required,notblank,max=63"`
+    SyncLoop time.Duration `config:"APP_SYNC_LOOP" validate:"mindur=1s"`
+    Workers  int           `config:"APP_WORKER_LIMIT" validate:"positive"`
+    Format   string        `config:"LOGGER_FORMAT,default=inline" validate:"oneof_ci=inline console"`
+    Addr     string        `config:"APP_SERVER_URL" validate:"required_without=Port,omitempty,listen_addr"`
+    Port     string        `config:"APP_SERVER_PORT" validate:"required_without=Addr,omitempty,port"`
+}
+```
+
+Встроенные: `required`, `omitempty`, `required_without=Field`, `gt`, `gte`, `lt`, `lte`, `min`, `max`, `eq`, `ne`, `oneof`, `port`, `ip`, `ipv4`, `ipv6`, `fqdn`, `hostname_rfc1123`, `dns_rfc1035_label`, `dirpath`, `duration`
+Сравнения для чисел по значению, для строк по длине, для `time.Duration` параметр понимает `1s`
+
+Поверх встроенных поставляются: `notblank`, `mindur`, `maxdur`, `listen_addr`, `oneof_ci`, `writable_dir`, `pg_ident`
+И алиасы: `positive` это `gt=0`, `nonneg` это `gte=0`, `host` это `hostname_rfc1123|ip|fqdn`, `log_level`, `pg_sslmode`
+
+`required` на число или длительность не нужен: `gt=0` уже отсекает ноль
+Директивы ставятся первыми: `required_without=Port,omitempty,listen_addr`
+
+Свои правила передаются в `Load` или `Validate`, опечатка в имени это ошибка на старте
+Своя функция заменяет поставочную, заменить встроенный тег можно только с `WithBuiltinOverride`
+
+```go
+err := viperr.Load(&cfg, dir, viperr.WithRules(viperr.Rule{
+    Tag: "cron_tz",
+    Fn: func(fl viperr.FieldLevel) bool {
+        _, err := time.LoadLocation(fl.Field().String())
+        return err == nil
+    },
+    Message: "{field} must be a valid IANA timezone",
+}))
+```
+
+`viperr.Validate(&v, opts...)` проверяет любую структуру теми же правилами без загрузки
+`viperr.Errors` это срез `FieldError`, разбирается через `errors.As`
+
+Нормализация это не проверка: trim и lower живут в `Normalize() error`, производные значения тоже там
+
+Метод `Validate() error` остаётся для того, что тегом не выразить
 
 ```go
 func (c Config) Validate() error {
