@@ -8,7 +8,6 @@ import (
 type fieldSpec struct {
 	key      string
 	source   string
-	required bool
 	hasDef   bool
 	def      string
 	path     bool
@@ -31,11 +30,6 @@ func parseTag(tag string) (fieldSpec, error) {
 		name, value, hasValue := strings.Cut(part, "=")
 		name = strings.TrimSpace(name)
 		switch name {
-		case "required":
-			if hasValue {
-				return fieldSpec{}, fmt.Errorf("required does not take a value")
-			}
-			spec.required = true
 		case "path":
 			if hasValue {
 				return fieldSpec{}, fmt.Errorf("path does not take a value")

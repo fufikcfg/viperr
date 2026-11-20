@@ -8,12 +8,12 @@
 // default.
 //
 // Fields carry one config tag. The first element is the key. The rest are
-// options: required, default=VALUE, path, and oneof=A|B.
+// options: default=VALUE, path, and oneof=A|B.
 // An optional source tag pins a field to one named source ("xml", "env", or
 // "process"). Without it, Decode searches sources in the order they were passed.
 //
 //	type Config struct {
-//		Key         string        `config:"APP_KEY,required"`
+//		Key         string        `config:"APP_KEY" validate:"required"`
 //		LockTimeout time.Duration `config:"APP_LOCK_TIMEOUT,default=5m"`
 //		Format      string        `config:"LOGGER_FORMAT,default=inline,oneof=inline|console"`
 //		LogPath     string        `config:"LOGGER_PATH,path,default=logs"`

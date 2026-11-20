@@ -38,8 +38,9 @@ type Options struct {
 // Sources are highest priority first. The first source that contains a key wins.
 // A field with source:"xml" (or env, process, or any Name) reads only that source.
 // A field default is used only when the selected sources do not contain the key.
-// required fails when the key is absent and the field has no default.
-// Presence is not the same as a non-zero Go value: "0" satisfies required and beats a default.
+// An absent key without a default leaves the zero value; validate tags decide
+// whether that is acceptable. Presence is not the same as a non-zero Go value:
+// "0" is a value and beats a default.
 //
 // After binding, Decode normalizes (see Normalizer), checks validate tags
 // (see Validate), then calls the Validator hook when implemented.
@@ -221,11 +222,8 @@ func bindField(fv reflect.Value, spec fieldSpec, opt Options, sources []Source) 
 	case found:
 	case spec.hasDef:
 		raw = spec.def
-		found = true
-	case spec.required:
-		return fmt.Errorf("viperr: %s: required", spec.key)
 	default:
-		return nil
+		return nil // absent without a default: zero value, validate tags decide
 	}
 
 	if spec.hasOneof && !oneOf(raw, spec.oneof) {

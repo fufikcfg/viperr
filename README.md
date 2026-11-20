@@ -14,14 +14,14 @@ go get github.com/fufikcfg/viperr
 
 ```go
 type Config struct {
-    Key         string        `config:"APP_KEY,required"`
+    Key         string        `config:"APP_KEY" validate:"required"`
     LockTimeout time.Duration `config:"APP_LOCK_TIMEOUT,default=5m"`
-    Workers     int           `config:"APP_WORKER_LIMIT,default=4"`
+    Workers     int           `config:"APP_WORKER_LIMIT,default=4" validate:"positive"`
     Format      string        `config:"LOGGER_FORMAT,default=inline,oneof=inline|console"`
     LogPath     string        `config:"LOGGER_PATH,path,default=logs"`
     Title       string        `config:"TITLE" source:"xml"`
     DB          struct {
-        Host string `config:"DB_HOST,required"`
+        Host string `config:"DB_HOST" validate:"required,notblank,host"`
     }
 }
 ```
@@ -73,7 +73,7 @@ if err := viperr.Load(&cfg, ""); err != nil {
 Имена, которые ставит `Load`: `process`, `env`, `xml`
 
 ```go
-Title string `config:"TITLE,required" source:"xml"`
+Title string `config:"TITLE" source:"xml" validate:"required"`
 Note  string `config:"NOTE" source:"env"`
 ```
 
@@ -81,16 +81,13 @@ Note  string `config:"NOTE" source:"env"`
 `Note` читается только из `.env`
 Поле без `source` идёт по приоритету: процесс, затем `.env`, затем XML, затем default
 
-Если в выбранном источнике ключа нет, срабатывает `default` или `required`
+Если в выбранном источнике ключа нет, срабатывает `default`
+Нет и default — поле остаётся нулевым, и это ловит тег `validate`
 Опечатка в имени, например `source:"xm"`, даёт ошибку: такого источника нет
 
 Свой список для `Decode` помечается через `viperr.Name`
 
 ## Тег config
-
-`required` означает, что ключа нет в выбранных источниках и нет `default`
-Вместе с `default` он не конфликтует: default закрывает отсутствие ключа
-Это не проверка «значение не ноль»
 
 `default=VALUE` подставляется, когда ключа нет
 
@@ -99,7 +96,7 @@ Note  string `config:"NOTE" source:"env"`
 `oneof=A|B` требует точного совпадения с одним из вариантов
 Сравнение идёт по строке как она пришла, до разрешения пути
 
-Пробелы вокруг опций допустимы: `` `config:"APP_KEY, required"` ``
+Пробелы вокруг опций допустимы: `` `config:"APP_KEY, default=dev"` ``
 
 Поле с тегом `config` из одного знака минус не читается
 
@@ -137,15 +134,15 @@ abs := viperr.Resolve("logs", appDir)
 Ошибки по полям собираются вместе, в тексте есть имя ключа
 
 1) разбор типа: `APP_LOCK_TIMEOUT=abc` или нечисловой int это ошибка
-2) присутствие: `required` в теге `config` без значения и без default
-3) набор значений: `oneof` в теге `config`
-4) нормализация: метод `Normalize() error` у секции или у корня; секции раньше корня
-5) тег `validate`: значения полей после привязки и нормализации
-6) своё правило: метод `Validate() error` у корня, вызывается последним
+2) набор значений: `oneof` в теге `config`
+3) нормализация: метод `Normalize() error` у секции или у корня; секции раньше корня
+4) тег `validate`: значения полей после привязки и нормализации
+5) своё правило: метод `Validate() error` у корня, вызывается последним
 
 ## Тег validate
 
 Второй тег проверяет уже привязанное значение
+Вся обязательность живёт здесь: `validate:"required"` значит значение не нулевое
 Запятая разделяет правила, `|` это «или» внутри одного правила, `=` передаёт параметр
 В ошибках поле называется ключом из `config`: не `SyncLoop`, а `APP_SYNC_LOOP`
 Первая неудача по полю останавливает его остальные правила

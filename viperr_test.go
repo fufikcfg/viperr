@@ -10,7 +10,7 @@ import (
 )
 
 type appConfig struct {
-	Key         string        `config:"APP_KEY,required"`
+	Key         string        `config:"APP_KEY"`
 	LockTimeout time.Duration `config:"APP_LOCK_TIMEOUT,default=5m"`
 	Workers     int           `config:"APP_WORKER_LIMIT,default=4"`
 	Format      string        `config:"LOGGER_FORMAT,default=inline,oneof=inline|console"`
@@ -18,7 +18,7 @@ type appConfig struct {
 	Enabled     bool          `config:"APP_ENABLED,default=true"`
 	Port        *int          `config:"APP_PORT"`
 	Nested      struct {
-		Host string `config:"DB_HOST,required"`
+		Host string `config:"DB_HOST"`
 	}
 	Skip string `config:"-"`
 }
@@ -89,9 +89,9 @@ func TestEmptyXMLDoesNotBlockDefault(t *testing.T) {
 		t.Fatal("empty tag counted as present")
 	}
 	var cfg struct {
-		Key     string        `config:"APP_KEY,required"`
+		Key     string        `config:"APP_KEY"`
 		Timeout time.Duration `config:"APP_LOCK_TIMEOUT,default=5m"`
-		Host    string        `config:"DB_HOST,required"`
+		Host    string        `config:"DB_HOST"`
 	}
 	if err := Decode(&cfg, Options{}, src); err != nil {
 		t.Fatal(err)
@@ -103,8 +103,8 @@ func TestEmptyXMLDoesNotBlockDefault(t *testing.T) {
 
 func TestRequiredMissing(t *testing.T) {
 	var cfg struct {
-		Key  string `config:"APP_KEY,required"`
-		Host string `config:"DB_HOST,required"`
+		Key  string `config:"APP_KEY" validate:"required"`
+		Host string `config:"DB_HOST" validate:"required"`
 	}
 	err := Decode(&cfg, Options{}, Map{})
 	if err == nil {
@@ -116,9 +116,22 @@ func TestRequiredMissing(t *testing.T) {
 	}
 }
 
-func TestDefaultSatisfiesRequired(t *testing.T) {
+func TestAbsentKeyWithoutDefaultStaysZero(t *testing.T) {
 	var cfg struct {
-		Key string `config:"APP_KEY,required,default=dev"`
+		Key string `config:"APP_KEY"`
+		N   int    `config:"APP_N"`
+	}
+	if err := Decode(&cfg, Options{}, Map{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Key != "" || cfg.N != 0 {
+		t.Fatalf("%+v", cfg)
+	}
+}
+
+func TestDefaultWhenKeyMissing(t *testing.T) {
+	var cfg struct {
+		Key string `config:"APP_KEY,default=dev"`
 	}
 	if err := Decode(&cfg, Options{}, Map{}); err != nil {
 		t.Fatal(err)
@@ -290,9 +303,9 @@ func TestSourcePin(t *testing.T) {
 	xml := Name(SourceXML, Map{"APP_KEY": "from-xml", "LOGGER_PATH": "xml-logs"})
 
 	var cfg struct {
-		Key     string `config:"APP_KEY,required"`
-		FromXML string `config:"APP_KEY,required" source:"xml"`
-		Host    string `config:"DB_HOST,required" source:"env"`
+		Key     string `config:"APP_KEY"`
+		FromXML string `config:"APP_KEY" source:"xml"`
+		Host    string `config:"DB_HOST" source:"env"`
 		Path    string `config:"LOGGER_PATH,path,default=logs" source:"xml"`
 		Format  string `config:"LOGGER_FORMAT,default=inline" source:"xml"`
 	}
@@ -335,9 +348,9 @@ func TestLoadSourceXML(t *testing.T) {
 	t.Setenv("TITLE", "from-proc")
 
 	var cfg struct {
-		Key   string `config:"APP_KEY,required"`
-		Title string `config:"TITLE,required" source:"xml"`
-		Host  string `config:"DB_HOST,required"`
+		Key   string `config:"APP_KEY"`
+		Title string `config:"TITLE" source:"xml"`
+		Host  string `config:"DB_HOST"`
 	}
 	if err := Load(&cfg, dir); err != nil {
 		t.Fatal(err)
