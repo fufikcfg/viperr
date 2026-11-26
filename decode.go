@@ -1,38 +1,35 @@
 package viperr
 
 import (
-	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"reflect"
-	"strconv"
 	"strings"
-	"time"
+
+	"github.com/fufikcfg/viperr/internal/bind"
+	"github.com/fufikcfg/viperr/internal/resolve"
 )
 
 // Validator is implemented by a destination that has rules beyond the config tag.
 // Decode calls it after every tagged field has been bound, normalized, and
 // validated. Prefer validate tags; keep Validate for rules tags cannot express.
-type Validator interface {
-	Validate() error
-}
+type Validator = bind.Validator
 
 // Normalizer is implemented by a destination or a nested section that fixes
 // up its own values — trim, lowercase, derive — before tag validation runs.
 // Sections are normalized before the root.
-type Normalizer interface {
-	Normalize() error
-}
+type Normalizer = bind.Normalizer
 
 // Options controls Decode.
-type Options struct {
-	// AppDir is the base for fields tagged path.
-	// An empty AppDir leaves a relative path relative.
-	AppDir string
-	// Validation customizes tag validation. Nil uses the shipped rules only.
-	Validation []Option
-}
+type Options = bind.Options
+
+// Entry describes how one tagged field was bound.
+type Entry = bind.Entry
+
+// Report is the provenance of every tagged field, in struct order.
+// Secret values are already masked, so a Report is safe to print or log.
+type Report = bind.Report
 
 // Decode binds sources into dst, which must be a pointer to a struct.
 // Sources are highest priority first. The first source that contains a key wins.
@@ -45,29 +42,13 @@ type Options struct {
 // After binding, Decode normalizes (see Normalizer), checks validate tags
 // (see Validate), then calls the Validator hook when implemented.
 func Decode(dst any, opt Options, sources ...Source) error {
-	v := reflect.ValueOf(dst)
-	if v.Kind() != reflect.Pointer || v.IsNil() {
-		return fmt.Errorf("viperr: destination must be a non-nil pointer to a struct")
-	}
-	v = v.Elem()
-	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("viperr: destination must be a non-nil pointer to a struct")
-	}
-	if err := bindStruct(v, opt, sources); err != nil {
-		return err
-	}
-	if err := normalizeValue(v); err != nil {
-		return fmt.Errorf("viperr: normalize: %w", err)
-	}
-	if err := Validate(dst, opt.Validation...); err != nil {
-		return err
-	}
-	if validator, ok := dst.(Validator); ok {
-		if err := validator.Validate(); err != nil {
-			return fmt.Errorf("viperr: validate: %w", err)
-		}
-	}
-	return nil
+	return bind.Decode(dst, opt, sources...)
+}
+
+// DecodeReport is Decode plus a Report of where every tagged field's value
+// came from (source name, "default", or "-"). Secret values are masked.
+func DecodeReport(dst any, opt Options, sources ...Source) (Report, error) {
+	return bind.DecodeReport(dst, opt, sources...)
 }
 
 // Load reads configuration for dir into dst.
@@ -76,312 +57,117 @@ func Decode(dst any, opt Options, sources ...Source) error {
 // Path fields are resolved against dir.
 // opts customize tag validation, see Validate.
 func Load(dst any, dir string, opts ...Option) error {
+	_, err := load(dst, dir, opts...)
+	return err
+}
+
+// LoadReport is Load plus a Report of where every tagged field's value came
+// from. Handy for a "config print" CLI command: load, then print the table.
+func LoadReport(dst any, dir string, opts ...Option) (Report, error) {
+	return load(dst, dir, opts...)
+}
+
+func load(dst any, dir string, opts ...Option) (Report, error) {
 	if strings.TrimSpace(dir) == "" {
 		resolved, err := ResolveAppDir()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		dir = resolved
 	}
+	sources, err := chain(dir)
+	if err != nil {
+		return nil, err
+	}
+	return DecodeReport(dst, Options{AppDir: dir, Validation: opts}, sources...)
+}
+
+// chain builds the standard source chain for dir:
+// process environment > dir/.env > dir settings.xml (or settings/settings.xml).
+func chain(dir string) ([]Source, error) {
 	sources := []Source{Name(SourceProcess, ProcessEnv())}
 
 	env, err := ParseEnvFile(filepath.Join(dir, ".env"))
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
 	if err != nil {
 		env = Map{}
 	}
 	sources = append(sources, Name(SourceEnv, env))
 
-	settings, err := settingsFile(dir)
+	settings, err := resolve.SettingsFile(dir)
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
 	var xmlMap Map
 	if err == nil {
 		xmlMap, err = ParseXMLFile(settings)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else {
 		xmlMap = Map{}
 	}
 	sources = append(sources, Name(SourceXML, xmlMap))
-	return Decode(dst, Options{AppDir: dir, Validation: opts}, sources...)
+	return sources, nil
 }
 
-// normalizeValue calls Normalize on nested sections first, then on v itself,
-// so the root sees sections already fixed up.
-func normalizeValue(v reflect.Value) error {
-	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		sf := t.Field(i)
-		if !sf.IsExported() {
-			continue
-		}
-		d := v.Field(i)
-		for d.Kind() == reflect.Pointer {
-			if d.IsNil() {
-				break
-			}
-			d = d.Elem()
-		}
-		if d.Kind() == reflect.Struct && d.Type() != reflect.TypeOf(time.Time{}) {
-			if err := normalizeValue(d); err != nil {
-				return err
-			}
-		}
-	}
-	if v.CanAddr() {
-		if n, ok := v.Addr().Interface().(Normalizer); ok {
-			return n.Normalize()
-		}
-	}
-	return nil
-}
-
-func bindStruct(v reflect.Value, opt Options, sources []Source) error {
-	var errs []error
-	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		sf := t.Field(i)
-		if !sf.IsExported() {
-			continue
-		}
-		tag := sf.Tag.Get("config")
-		if tag == "-" {
-			continue
-		}
-		fv := v.Field(i)
-		if tag == "" {
-			if err := bindNested(fv, opt, sources); err != nil {
-				errs = append(errs, err)
-			}
-			continue
-		}
-		spec, err := parseTag(tag)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("viperr: %s: %w", sf.Name, err))
-			continue
-		}
-		spec.source = strings.TrimSpace(sf.Tag.Get("source"))
-		if err := bindField(fv, spec, opt, sources); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errorsJoin(errs)
-}
-
-func bindNested(fv reflect.Value, opt Options, sources []Source) error {
-	base := fv.Type()
-	pointer := false
-	if base.Kind() == reflect.Pointer {
-		if base.Elem().Kind() != reflect.Struct {
-			return nil
-		}
-		pointer = true
-		base = base.Elem()
-	}
-	if base.Kind() != reflect.Struct || base == reflect.TypeOf(time.Time{}) {
-		return nil
-	}
-	if pointer {
-		if fv.IsNil() {
-			fv.Set(reflect.New(base))
-		}
-		fv = fv.Elem()
-	}
-	if !fv.CanSet() {
-		return nil
-	}
-	return bindStruct(fv, opt, sources)
-}
-
-func bindField(fv reflect.Value, spec fieldSpec, opt Options, sources []Source) error {
-	target := fv
-	if target.Kind() == reflect.Pointer {
-		elem := target.Type().Elem()
-		if elem.Kind() == reflect.Struct && elem != reflect.TypeOf(time.Time{}) {
-			return fmt.Errorf("viperr: %s: struct field cannot use a config key", spec.key)
-		}
-	}
-	kind := fieldKind(target)
-	if spec.path && kind != kindString {
-		return fmt.Errorf("viperr: %s: path is only valid on a string", spec.key)
-	}
-	if kind == kindOther {
-		return fmt.Errorf("viperr: %s: unsupported type %s", spec.key, target.Type())
-	}
-
-	raw, found, err := lookup(spec.key, spec.source, sources)
+// Get reads one key along the standard source chain (process environment,
+// then .env, then settings.xml) of the directory returned by ResolveAppDir.
+// It needs no struct and no tag — useful for reading a lone secret such as
+// GATEWAY_API_KEY without declaring a config section.
+//
+// ok reports whether the key was found in any source. When the key is absent
+// and a default is given, Get returns the default and ok is false.
+func Get(key string, def ...string) (string, bool) {
+	dir, err := ResolveAppDir()
 	if err != nil {
-		return fmt.Errorf("viperr: %s: %w", spec.key, err)
+		// No app directory: the process environment is still a valid source.
+		if v, ok := ProcessEnv().Lookup(key); ok {
+			return v, true
+		}
+		if len(def) > 0 {
+			return def[0], false
+		}
+		return "", false
 	}
-	switch {
-	case found:
-	case spec.hasDef:
-		raw = spec.def
-	default:
-		return nil // absent without a default: zero value, validate tags decide
-	}
-
-	if spec.hasOneof && !oneOf(raw, spec.oneof) {
-		return fmt.Errorf("viperr: %s: must be one of %s", spec.key, strings.Join(spec.oneof, ", "))
-	}
-	if spec.path {
-		raw = Resolve(raw, opt.AppDir)
-	}
-	if err := assign(target, raw); err != nil {
-		return fmt.Errorf("viperr: %s: %w", spec.key, err)
-	}
-	return nil
+	return GetFrom(dir, key, def...)
 }
 
-func lookup(key, want string, sources []Source) (string, bool, error) {
-	if want != "" && !sourceLoaded(sources, want) {
-		return "", false, fmt.Errorf("source %q is not loaded", want)
+// GetFrom is Get against an explicit directory instead of ResolveAppDir.
+func GetFrom(dir, key string, def ...string) (string, bool) {
+	sources, err := chain(dir)
+	if err != nil {
+		if len(def) > 0 {
+			return def[0], false
+		}
+		return "", false
 	}
 	for _, src := range sources {
-		if src == nil {
-			continue
-		}
-		if want != "" && sourceName(src) != want {
-			continue
-		}
-		if value, ok := src.Lookup(key); ok {
-			return value, true, nil
+		if v, ok := src.Lookup(key); ok {
+			return v, true
 		}
 	}
-	return "", false, nil
+	if len(def) > 0 {
+		return def[0], false
+	}
+	return "", false
 }
 
-func sourceLoaded(sources []Source, name string) bool {
-	for _, src := range sources {
-		if src != nil && sourceName(src) == name {
-			return true
-		}
+// Explain loads dst from dir (ResolveAppDir when dir is empty or omitted) and
+// writes a table of every tagged field: key, origin source, Go field, and
+// value with secrets masked. It is the building block for a "config print"
+// CLI command and for debugging which source won.
+func Explain(w io.Writer, dst any, dir ...string) error {
+	var base string
+	if len(dir) > 0 {
+		base = dir[0]
 	}
-	return false
-}
-
-func sourceName(src Source) string {
-	named, ok := src.(interface{ SourceName() string })
-	if !ok {
-		return ""
+	report, err := LoadReport(dst, base)
+	if err != nil {
+		return err
 	}
-	return named.SourceName()
-}
-
-func oneOf(raw string, allowed []string) bool {
-	for _, item := range allowed {
-		if raw == item {
-			return true
-		}
-	}
-	return false
-}
-
-type scalarKind int
-
-const (
-	kindOther scalarKind = iota
-	kindString
-	kindBool
-	kindInt
-	kindUint
-	kindDuration
-)
-
-func fieldKind(fv reflect.Value) scalarKind {
-	t := fv.Type()
-	if t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	switch {
-	case t == reflect.TypeOf(time.Duration(0)):
-		return kindDuration
-	case t.Kind() == reflect.String:
-		return kindString
-	case t.Kind() == reflect.Bool:
-		return kindBool
-	case isInt(t.Kind()):
-		return kindInt
-	case isUint(t.Kind()):
-		return kindUint
-	default:
-		return kindOther
-	}
-}
-
-func assign(fv reflect.Value, raw string) error {
-	t := fv.Type()
-	if t.Kind() == reflect.Pointer {
-		elem := reflect.New(t.Elem())
-		if err := assign(elem.Elem(), raw); err != nil {
-			return err
-		}
-		fv.Set(elem)
-		return nil
-	}
-	if !fv.CanSet() {
-		return fmt.Errorf("cannot set field")
-	}
-	switch {
-	case t == reflect.TypeOf(time.Duration(0)):
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			return fmt.Errorf("invalid duration %q", raw)
-		}
-		fv.SetInt(int64(d))
-		return nil
-	case t.Kind() == reflect.String:
-		fv.SetString(raw)
-		return nil
-	case t.Kind() == reflect.Bool:
-		b, err := strconv.ParseBool(raw)
-		if err != nil {
-			return fmt.Errorf("invalid bool %q", raw)
-		}
-		fv.SetBool(b)
-		return nil
-	case isInt(t.Kind()):
-		n, err := strconv.ParseInt(raw, 10, t.Bits())
-		if err != nil {
-			return fmt.Errorf("invalid int %q", raw)
-		}
-		fv.SetInt(n)
-		return nil
-	case isUint(t.Kind()):
-		n, err := strconv.ParseUint(raw, 10, t.Bits())
-		if err != nil {
-			return fmt.Errorf("invalid uint %q", raw)
-		}
-		fv.SetUint(n)
-		return nil
-	default:
-		return fmt.Errorf("unsupported type %s", t)
-	}
-}
-
-func isInt(k reflect.Kind) bool {
-	switch k {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return true
-	default:
-		return false
-	}
-}
-
-func isUint(k reflect.Kind) bool {
-	switch k {
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return true
-	default:
-		return false
-	}
-}
-
-func errorsJoin(errs []error) error {
-	return errors.Join(errs...)
+	_, err = fmt.Fprint(w, report.String())
+	return err
 }

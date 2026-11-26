@@ -1,4 +1,4 @@
-package viperr
+package validate
 
 import (
 	"net"

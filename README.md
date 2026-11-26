@@ -90,8 +90,20 @@ Note  string `config:"NOTE" source:"env"`
 ## Тег config
 
 `default=VALUE` подставляется, когда ключа нет
+Запятая внутри значения экранируется обратным слэшем, обратный слэш удваивается:
+
+```go
+Origins string `config:"CORS_ALLOWED_ORIGINS,default=http://localhost:3000\\,http://localhost:8080"`
+```
 
 `path` только для `string`: путь относительно каталога приложения
+
+`noabs` вместе с `path`: «чужой» абсолютный путь остаётся как есть и не перебазируется на каталог приложения
+На Windows это путь от корня (`/etc/gateway/routes.d`), на остальных системах это путь с диском (`C:\var\log`)
+Файл по такому пути просто не найдётся — честная ошибка вместо странного `<appdir>\etc\...`
+
+`secret` помечает значение секретом: в отчётах `Report` и `Explain` оно маскируется
+Ключи, похожие на секрет (`*_KEY`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*` и т.п.), маскируются и без опции
 
 `oneof=A|B` требует точного совпадения с одним из вариантов
 Сравнение идёт по строке как она пришла, до разрешения пути
@@ -121,12 +133,45 @@ Note  string `config:"NOTE" source:"env"`
 Запасной путь задаётся так: `` `config:"LOGGER_PATH,path,default=logs"` ``
 
 Каталог приложения ищет `ResolveAppDir`: первый из рабочего каталога, каталога исполняемого файла и его родителя, где лежит `.env`, `settings.xml` или `settings/settings.xml`
+Свой список маркеров передаётся аргументами: `ResolveAppDir("go.mod", "routes")`
 Если ни в одном маркера нет, возвращается рабочий каталог
 
 Отдельный вызов, без загрузки:
 
 ```go
 abs := viperr.Resolve("logs", appDir)
+strict := viperr.ResolveStrict("/etc/gateway/routes.d", appDir) // чужой абсолютный путь как есть
+```
+
+## Один ключ без структуры
+
+`Get` читает одиночный ключ по стандартной цепочке (процесс, затем `.env`, затем XML) из каталога `ResolveAppDir`
+`GetFrom` делает то же для явного каталога
+`ok` говорит, найден ли ключ; с default он возвращается при отсутствии ключа, и `ok` остаётся `false`
+
+```go
+v, ok := viperr.Get("HTTP_PORT")
+v, ok = viperr.Get("HTTP_PORT", "8080")
+key, ok := viperr.Get("GATEWAY_API_KEY") // секрет: прочитать и не логировать
+```
+
+## Откуда взялось значение
+
+`DecodeReport` и `LoadReport` работают как `Decode` и `Load`, но возвращают `Report`: по записи на каждое поле с тегом — ключ, источник-победитель (`process`, `env`, `xml`, `default` или `-`), имя Go поля и значение
+Секреты в отчёте уже замаскированы (`***`), его безопасно печатать и логировать
+
+```go
+report, err := viperr.LoadReport(&cfg, dir)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Print(report)
+```
+
+`Explain` делает то же одним вызовом и пишет таблицу в любой writer — готовый `config print` для CLI:
+
+```go
+err := viperr.Explain(os.Stdout, &cfg, dir)
 ```
 
 ## Проверка
@@ -242,3 +287,9 @@ type Source interface {
 
 `Options.AppDir` это база для полей `path`
 Пустой `AppDir` оставляет относительный путь относительным
+
+## Устройство пакета
+
+Публичный API живёт в корневом пакете `viperr`
+Реализация разнесена по внутренним пакетам в `internal/`: `bind` (привязка и отчёты), `tag` (разбор тега `config`), `source` (источники), `resolve` (пути и каталог приложения), `dotenv` и `xmlconf` (парсеры файлов), `validate` (движок тега `validate`)
+Go toolchain разрешает импорт `internal/...` только коду внутри этого модуля: снаружи доступен лишь корневой пакет
